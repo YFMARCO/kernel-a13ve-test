@@ -33,6 +33,9 @@
 #include <linux/list_lru.h>
 #include "internal.h"
 #include "mount.h"
+#ifdef CONFIG_KDP_NS
+#include <linux/kdp.h>
+#endif
 
 /*
  * Usage:
@@ -714,12 +717,12 @@ static inline bool fast_dput(struct dentry *dentry)
 	 */
 	if (unlikely(ret < 0)) {
 		spin_lock(&dentry->d_lock);
-		if (WARN_ON_ONCE(dentry->d_lockref.count <= 0)) {
+		if (dentry->d_lockref.count > 1) {
+			dentry->d_lockref.count--;
 			spin_unlock(&dentry->d_lock);
 			return true;
 		}
-		dentry->d_lockref.count--;
-		goto locked;
+		return false;
 	}
 
 	/*
@@ -770,7 +773,6 @@ static inline bool fast_dput(struct dentry *dentry)
 	 * else could have killed it and marked it dead. Either way, we
 	 * don't need to do anything else.
 	 */
-locked:
 	if (dentry->d_lockref.count) {
 		spin_unlock(&dentry->d_lock);
 		return true;
@@ -1435,7 +1437,7 @@ static enum d_walk_ret select_collect(void *_data, struct dentry *dentry)
 		goto out;
 
 	if (dentry->d_flags & DCACHE_SHRINK_LIST) {
-		data->found++;
+		goto out;
 	} else {
 		if (dentry->d_flags & DCACHE_LRU_LIST)
 			d_lru_del(dentry);
@@ -1465,6 +1467,7 @@ void shrink_dcache_parent(struct dentry *parent)
 {
 	for (;;) {
 		struct select_data data;
+		bool need_sched = true;
 
 		INIT_LIST_HEAD(&data.dispose);
 		data.start = parent;
@@ -1477,9 +1480,18 @@ void shrink_dcache_parent(struct dentry *parent)
 			continue;
 		}
 
-		cond_resched();
+		if (cond_resched())
+			need_sched = false;
+
 		if (!data.found)
 			break;
+
+		if (unlikely(need_sched)) {
+			long prev_state = current->state;
+
+			if (!schedule_timeout_uninterruptible(1))
+				set_current_state(prev_state);
+		}
 	}
 }
 EXPORT_SYMBOL(shrink_dcache_parent);
@@ -2970,25 +2982,28 @@ EXPORT_SYMBOL(d_splice_alias);
   
 bool is_subdir(struct dentry *new_dentry, struct dentry *old_dentry)
 {
-	bool subdir;
+	bool result;
 	unsigned seq;
 
 	if (new_dentry == old_dentry)
 		return true;
 
-	/* Access d_parent under rcu as d_move() may change it. */
-	rcu_read_lock();
-	seq = read_seqbegin(&rename_lock);
-	subdir = d_ancestor(old_dentry, new_dentry);
-	 /* Try lockless once... */
-	if (read_seqretry(&rename_lock, seq)) {
-		/* ...else acquire lock for progress even on deep chains. */
-		read_seqlock_excl(&rename_lock);
-		subdir = d_ancestor(old_dentry, new_dentry);
-		read_sequnlock_excl(&rename_lock);
-	}
-	rcu_read_unlock();
-	return subdir;
+	do {
+		/* for restarting inner loop in case of seq retry */
+		seq = read_seqbegin(&rename_lock);
+		/*
+		 * Need rcu_readlock to protect against the d_parent trashing
+		 * due to d_move
+		 */
+		rcu_read_lock();
+		if (d_ancestor(old_dentry, new_dentry))
+			result = true;
+		else
+			result = false;
+		rcu_read_unlock();
+	} while (read_seqretry(&rename_lock, seq));
+
+	return result;
 }
 EXPORT_SYMBOL(is_subdir);
 
@@ -3100,8 +3115,10 @@ void __init vfs_caches_init_early(void)
 	for (i = 0; i < ARRAY_SIZE(in_lookup_hashtable); i++)
 		INIT_HLIST_BL_HEAD(&in_lookup_hashtable[i]);
 
+	set_memsize_kernel_type(MEMSIZE_KERNEL_VFSHASH);
 	dcache_init_early();
 	inode_init_early();
+	set_memsize_kernel_type(MEMSIZE_KERNEL_OTHERS);
 }
 
 void __init vfs_caches_init(void)
@@ -3116,4 +3133,7 @@ void __init vfs_caches_init(void)
 	mnt_init();
 	bdev_cache_init();
 	chrdev_init();
+#ifdef CONFIG_KDP_NS
+	ns_protect = 1;
+#endif
 }

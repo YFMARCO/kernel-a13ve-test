@@ -7,10 +7,6 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/scatterlist.h>
-#ifndef __GENKSYMS__
-#include <linux/blkdev.h>
-#include <linux/blk-cgroup.h>
-#endif
 
 #include <trace/events/block.h>
 
@@ -421,9 +417,10 @@ static int __blk_bios_map_sg(struct request_queue *q, struct bio *bio,
 	int cluster = blk_queue_cluster(q), nsegs = 0;
 
 	for_each_bio(bio)
-		bio_for_each_segment(bvec, bio, iter)
+		bio_for_each_segment(bvec, bio, iter) {
 			__blk_segment_map_sg(q, &bvec, sglist, &bvprv, sg,
 					     &nsegs, &cluster);
+		}
 
 	return nsegs;
 }
@@ -488,9 +485,6 @@ static inline int ll_new_hw_segment(struct request_queue *q,
 	int nr_phys_segs = bio_phys_segments(q, bio);
 
 	if (req->nr_phys_segments + nr_phys_segs > queue_max_segments(q))
-		goto no_merge;
-
-	if (!blk_cgroup_mergeable(req, bio))
 		goto no_merge;
 
 	if (blk_integrity_merge_bio(q, req, bio) == false)
@@ -618,9 +612,6 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
 	}
 
 	if (total_phys_segments > queue_max_segments(q))
-		return 0;
-
-	if (!blk_cgroup_mergeable(req, next->bio))
 		return 0;
 
 	if (blk_integrity_merge_rq(q, req, next) == false)
@@ -792,6 +783,7 @@ static struct request *attempt_merge(struct request_queue *q,
 	 * 'next' is going away, so update stats accordingly
 	 */
 	blk_account_io_merge(next);
+	blk_queue_io_vol_merge(q, next->cmd_flags, -1, 0);
 
 	req->ioprio = ioprio_best(req->ioprio, next->ioprio);
 	if (blk_rq_cpu_valid(next))
@@ -858,10 +850,6 @@ bool blk_rq_merge_ok(struct request *rq, struct bio *bio)
 
 	/* must be same device and not a special request */
 	if (rq->rq_disk != bio->bi_disk || req_no_special_merge(rq))
-		return false;
-
-	/* don't merge across cgroup boundaries */
-	if (!blk_cgroup_mergeable(rq, bio))
 		return false;
 
 	/* only merge integrity protected bio into ditto rq */

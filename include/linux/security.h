@@ -54,6 +54,12 @@ struct xattr;
 struct xfrm_sec_ctx;
 struct mm_struct;
 
+#ifdef CONFIG_KDP_CRED
+#include <linux/kdp.h>
+#else
+#define security_integrity_current()  0
+#endif
+
 /* Default (no) options for the capable function */
 #define CAP_OPT_NONE 0x0
 /* If capable should audit the security request */
@@ -322,8 +328,6 @@ int security_file_permission(struct file *file, int mask);
 int security_file_alloc(struct file *file);
 void security_file_free(struct file *file);
 int security_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
-int security_file_ioctl_compat(struct file *file, unsigned int cmd,
-			       unsigned long arg);
 int security_mmap_file(struct file *file, unsigned long prot,
 			unsigned long flags);
 int security_mmap_addr(unsigned long addr);
@@ -832,13 +836,6 @@ static inline void security_file_free(struct file *file)
 
 static inline int security_file_ioctl(struct file *file, unsigned int cmd,
 				      unsigned long arg)
-{
-	return 0;
-}
-
-static inline int security_file_ioctl_compat(struct file *file,
-					     unsigned int cmd,
-					     unsigned long arg)
 {
 	return 0;
 }

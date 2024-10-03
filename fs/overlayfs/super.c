@@ -19,6 +19,9 @@
 #include <linux/posix_acl_xattr.h>
 #include <linux/exportfs.h>
 #include "overlayfs.h"
+#ifdef CONFIG_KDP
+#include <linux/kdp.h>
+#endif
 
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Overlay filesystem");
@@ -273,8 +276,8 @@ static int ovl_sync_fs(struct super_block *sb, int wait)
 		return 0;
 
 	/*
-	 * Not called for sync(2) call or an emergency sync (SB_I_SKIP_SYNC).
-	 * All the super blocks will be iterated, including upper_sb.
+	 * If this is a sync(2) call or an emergency sync, all the super blocks
+	 * will be iterated, including upper_sb, so no need to do anything.
 	 *
 	 * If this is a syncfs(2) call, then we do need to call
 	 * sync_filesystem() on upper_sb, but enough if we do it when being
@@ -675,14 +678,10 @@ retry:
 			goto retry;
 		}
 
-		err = ovl_mkdir_real(dir, &work, attr.ia_mode);
-		if (err)
-			goto out_dput;
-
-		/* Weird filesystem returning with hashed negative (kernfs)? */
-		err = -EINVAL;
-		if (d_really_is_negative(work))
-			goto out_dput;
+		work = ovl_create_real(dir, work, OVL_CATTR(attr.ia_mode));
+		err = PTR_ERR(work);
+		if (IS_ERR(work))
+			goto out_err;
 
 		/*
 		 * Try to remove POSIX ACL xattrs from workdir.  We are good if:
@@ -1387,7 +1386,11 @@ static int ovl_get_lower_layers(struct super_block *sb, struct ovl_fs *ofs,
 		 * Make lower layers R/O.  That way fchmod/fchown on lower file
 		 * will fail instead of modifying lower fs.
 		 */
+#ifdef CONFIG_KDP_NS
+		kdp_set_mnt_flags(mnt, MNT_READONLY|MNT_NOATIME);
+#else
 		mnt->mnt_flags |= MNT_READONLY | MNT_NOATIME;
+#endif
 
 		ofs->lower_layers[ofs->numlower].trap = trap;
 		ofs->lower_layers[ofs->numlower].mnt = mnt;
@@ -1703,7 +1706,6 @@ static int ovl_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_xattr = ovl_xattr_handlers;
 	sb->s_fs_info = ofs;
 	sb->s_flags |= SB_POSIXACL;
-	sb->s_iflags |= SB_I_SKIP_SYNC;
 
 	err = -ENOMEM;
 	root_dentry = d_make_root(ovl_new_inode(sb, S_IFDIR, 0));
